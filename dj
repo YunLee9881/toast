@@ -1,0 +1,404 @@
+ap-northeast-2 와 us-east-1 리전 구성
+CRUD 작업을 진행한 경우 다른 리전도 해당 데이터를 읽거나 수정이 가능해야 함
+
+ap-northeast-2 와 us-east-1에 동일한 vpc 구성
+-	ap-northeast-2
+ 
+
+-	us-east-1
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+bastion, cluster, node group, fargate profile 용 iam 역할을 생성한다.
+
+bastion은 admin policy 
+cluster : AmazonEKSClusterPolicy
+nodegroup : 
+AmazonEKS_CNI_Policy
+AmazonEKSWorkerNodePolicy
+AmazonEC2ContainerRegistryReadOnly
+AmazonDynamoDBReadOnlyAccess
+fargate profile : 
+
+
+
+(ap-northeast-2 와 us-east-1 리전 구성)
+
+bastion을 생성해주고 iam 할당과 패키지를 설치한다. 
+
+
+
+
+
+
+
+
+rds subnet group protected subnet으로 생성
+rds cluster parameter group 생성후 binlog_format 옵션 ROW 로 변경
+ 
+
+RDS subnet group 생성해서 protect 서브넷만 선택
+rds는 ap-northeast-2에 구성후 us-east-1로 복제
+
+cluster identifier :  hrdkorea-rds
+username: hrdkorea_user
+Password :  Skill53##
+Instance type : db.r5.large
+Engine :  Aurora MySQL 3.04.0 
+Port :  3409
+db_name: hrdkorea
+
+instance 선택후 수정 ->  identifier : hrdkorea-rds-instance
+ 
+
+
+
+리전간 읽기 전용 복제본 생성 
+us-east-1에도 subnet 그룹 생성하고 protect subnet만 선택
+다른 설정은 그대로 하고 instance 식별자만 hrdkorea-rds-instance-us 로 변경하기
+ 
+ 
+
+enable binlog 이런 에러가 뜨면 클러스터 파라미터그룹 생성해서 binlog_format를 MIXED로 설정하고 RDS에 적용해주면 됨 > 하면 인스턴스 리붓 해줘야함
+
+
+
+
+
+
+
+dynamodb는 온디맨드 방식으로 생성한다
+테이블 us-east-1로 복제
+ 
+
+
+
+bastion에 mysql 설치해서 rds 접속
+sudo wget https://dev.mysql.com/get/mysql80-community-release-el9-1.noarch.rpm
+sudo dnf install mysql80-community-release-el9-1.noarch.rpm -y
+sudo rpm --import https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
+sudo dnf install mysql-community-server -y
+systemctl enable --now mysqld
+
+mysql -u hrdkorea_user -p -P 3409 -h <RDS Endpoint>
+
+아래 sql문으로 테이블 생성
+USE hrdkorea;
+
+CREATE TABLE product (
+    id VARCHAR(255) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    category VARCHAR(255) NOT NULL
+);
+
+CREATE TABLE customer (
+    id VARCHAR(255) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    gender VARCHAR(255) NOT NULL
+);
+
+
+
+하나의 ecr을 생성하고, 이미지 스캔을 활성화 한다.
+repo 복제 규칙을 생성하고 리전을 us-east-1으로 지정한다.
+이미지를 업로드할때는 각각의 application 이름으로 tag를 지정한다
+ 
+ 
+
+image tag및 push 할때 application 이름으로 tag지정
+ 
+us-east-1도 생성되었는지 확인
+
+
+
+
+
+
+s3는 ap-northeast-2에만 생성한다. 제공된 파일은 /static 경로에 업로드 한다.
+ 
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cloudfront는 http redirects https를 선택하고, ipv6을 비활성화한다.
+s3는 캐싱하고, tag로 cdn의 name을 지정해준다.
+ 
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(ap-northeast-2 와 us-east-1 리전 구성)
+eks cluster 생성   
+
+
+
+
+nodegroup 과 fargate profile 생성
+nodegroup에 label 추가
+skills/dedicated: <service-name>
+
+node 에
+-	애플리케이션과 secrets manager관련된 addon을 제외한 다른 리소스들은 customer Nodegroup에 존재 해서는 안 됩니다.
+라는 조건있는데 secret manager 관련 채점은 안함
+과제지에도 secret관련 항목이 없어서 일단 안만들었음
+
+각각 bastion 접속해서 deploy 생성
+-> us-east-1 deploy 생성시 deployment yaml의 order  region을 us-east-1로 변경
+rds endpoint도 변경, ecr 이미지 주소도 변경
+ 
+
+
+
+eksctl utils associate-iam-oidc-provider --cluster hrdkorea-cluster --approve
+
+order application은 service-account 할당해줘야함
+eksctl create iamserviceaccount --name order-sa --namespace hrdkorea --cluster hrdkorea-cluster --role-name "hrdkorea-order-app-role" --attach-policy-arn arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess --approve
+
+us-east-1 eks에서는 아래 명령어
+eksctl create iamserviceaccount --name order-sa --namespace hrdkorea --cluster hrdkorea-cluster --role-name "hrdkorea-order-app-role-us" --attach-policy-arn arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess --approve
+
+
+alb controller 설치 및 서브넷 태그 설정
+public: kubernetes.io/role/elb=1
+private: kubernetes.io/role/internal-elb=1
+ 
+#! /bin/bash
+export CLUSTER_NAME=hrdkorea-cluster
+export AWS_ACCOUNT_ID={}
+export AWS_REGION={}
+
+
+curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+sudo mv /tmp/eksctl /usr/local/bin
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+chmod 700 get_helm.sh
+./get_helm.sh
+
+
+curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json
+aws iam create-policy \
+    --policy-name AWSLoadBalancerControllerIAMPolicy \
+    --policy-document file://iam_policy.json
+eksctl utils associate-iam-oidc-provider \
+  --region=${AWS_REGION} \
+  --cluster=${CLUSTER_NAME} \
+  --approve
+eksctl create iamserviceaccount \
+  --cluster=${CLUSTER_NAME} \
+  --region=${AWS_REGION} \
+  --namespace=hrdkorea \
+  --name=aws-load-balancer-controller \
+  --role-name AmazonEKSLoadBalancerControllerRole-${AWS_REGION} \
+  --attach-policy-arn=arn:aws:iam::${AWS_ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy \
+  --override-existing-serviceaccounts \
+  --approve
+
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update eks
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n hrdkorea \
+  --set clusterName=${CLUSTER_NAME} \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set podLabels.isAddon=yes \
+  --set region=<region_code> \
+  --set vpcId=<위 리전의 vpc id>
+
+chmod +x alb-install.sh
+./alb-install.sh
+
+
+ingress 생성후 healthcheck 조건을  query string 지정
+(file에 ingress 파일 수정해뒀음 그대로 하면됨)
+
+
+
+
+logging dashbord 생성을 위해서 클러스터 지표 수집하는 cloudwatch agent 설정
+(아래 명령어들 그냥 복붙하기)
+
+
+
+아래 명령어로 cloudwatch namespace 생성
+kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/cloudwatch-namespace.yaml
+
+
+
+아래 명령어로 cluster에서 cloudwatch agent 서비스 계정 생성
+kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/cwagent/cwagent-serviceaccount.yaml
+
+
+
+아래 명령어로 cloudwatch agent에 대한 config map 생성
+curl -O https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/cwagent/cwagent-configmap.yaml
+
+
+
+yaml 파일 수정
+sudo vi cwagent-configmap.yaml
+
+{{cluster_name}}은 hrdkorea-cluster로 변경
+# create configmap for cwagent config
+apiVersion: v1
+data:
+  # Configuration is in Json format. No matter what configure change you make,
+  # please keep the Json blob valid.
+  cwagentconfig.json: |
+    {
+      "logs": {
+        "metrics_collected": {
+          "kubernetes": {
+            "cluster_name": {{cluster_name}},
+            "metrics_collection_interval": 60
+          }
+        },
+        "force_flush_interval": 5
+      }
+    }
+kind: ConfigMap
+metadata:
+  name: cwagentconfig
+  namespace: amazon-cloudwatch
+
+
+
+
+
+
+아래 명령어로 config map 생성
+kubectl apply -f cwagent-configmap.yaml
+
+
+
+아래 명령어로 cloudwatch agent 배포
+kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/cwagent/cwagent-daemonset.yaml
+
+
+
+설치 확인
+kubectl get pods -n amazon-cloudwatch
+
+
+
+
+
+
+
+
+
+
+
+
+
+두 리전의 alb origin도 각각 추가
+
+behavior에 ap-northeast-2 alb를 원본으로 하고 아래처럼 설정하고 추가
+ 
+
+
+
+us-east-1 리전에서 함수 생성
+
+
+
+
+
+(ap-northeast-2 와 us-east-1 리전 구성)
+cloudwatch 대시보드 생성
+  
+자동저장 켜주기
+
+
+
+number 유형 선택후 위젯 name은 Node Active summary로 지정
+ 
+
+
+
+ 
+
+
+
+
+
+
+
+
+
+지표 > ContainerInsights > ClusterName > 10번째쯤에 cluster_node_count
+ 
+그래프로 표시된 지표에서 통계는 합계로 기간은 1분으로 변경
+ 
+
+ 
+
+
+
+ALB Failover는 조금 야매긴 한데
+import json
+import urllib3
+
+def lambda_handler(event, context):
+    request = event['Records'][0]['cf']['request']
+    
+    primary_origin = '<ap-alb-dns>'
+    secondary_origin = '<us-alb-dns>'
+    
+    http = urllib3.PoolManager()
+    response = http.request('GET', f'http://{primary_origin}/healthcheck')
+        
+    if not (200 <= response.status < 300):
+        request['origin']['custom']['domainName'] = secondary_origin
+        request['headers']['host'] = [{'key': 'Host', 'value': secondary_origin}]
+    
+    return request
+
+위 코드로 us-east-1에 함수 생성해서 넣고
+
+그리고 lambda-edge로 /v1/*에 origin request로 등록
+https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/lambda-edge-permissions.html
